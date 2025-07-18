@@ -1,45 +1,76 @@
-name: Convert Monaco OSM to Parquet
+name: Test converting Geoparquet Snapshots
 
-# Controls when the action will run.
-# "workflow_dispatch" allows you to run this workflow manually from the Actions tab.
-# "push" with a branch filter runs the workflow on every push to the main branch.
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
+
+env:
+  REMOTE_NAME: openplanetdata-r2
 
 jobs:
-  # The single job in this workflow
-  build:
-    # The type of runner that the job will run on
-    runs-on: ubuntu-latest
+  geoparquet:
+    runs-on: openplanetdata-cortex
 
-    # A sequence of tasks that will be executed as part of the job
+    outputs:
+      tag: ${{ steps.date.outputs.tag }}
+
     steps:
-      # Step 1: Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - name: Set date tag
+        id: date
+        run: echo "tag=$(date '+%Y%m%d')" >>"$GITHUB_OUTPUT"
 
-      # Step 2: Set up Python environment
-      - name: Set up Python
+      - name: Install dependencies (skip if already present)
+        shell: bash
+        run: |
+          need_install() { ! command -v "$1" >/dev/null 2>&1; }
+          
+          pkgs=()
+          need_install unzip && pkgs+=(unzip)
+          
+          if ((${#pkgs[@]})); then
+            sudo dnf -y install "${pkgs[@]}"
+          else
+            echo "All required packages already present."
+          fi
+
+      - name: Set up python
         uses: actions/setup-python@v5
-
-      # Step 3: Install the required Python package with the CLI extra
+        with:
+          python-version: '3.13'
+    
+      # Quackosm is needed to convert the PBF to geoparquet format.
       - name: Install quackosm
         run: pip install 'quackosm[cli]'
 
-      # Step 4: Download the OpenStreetMap PBF file for Monaco
-      - name: Download Monaco PBF
-        run: wget https://download.geofabrik.de/europe/monaco-latest.osm.pbf
+      - name: Install rclone (skip if already present)
+        run: |
+          mkdir -p ~/.config/rclone
+          command -v rclone >/dev/null || curl https://rclone.org/install.sh | sudo bash
 
-      # Step 5: Run the quackosm conversion command
-      - name: Convert PBF to Parquet
-        run: quackosm monaco-latest.osm.pbf --output monaco-latest.osm.parquet
-        
+      - name: Download latest published PBF
+        run: |
+          time rclone copy \
+            --http-url https://download.openplanetdata.com :http:osm/planet/pbf/planet-latest.osm.pbf . \
+            --multi-thread-cutoff 0 \
+            --multi-thread-streams 64 \
+            --multi-thread-chunk-size 512M \
+            --transfers 1 --progress
+          mv planet-latest.osm.pbf "planet-${{ steps.date.outputs.tag }}.osm.pbf"
+
+      - name: Build Geoparquet variant
+        run: |
+          g="planet-${{ steps.date.outputs.tag }}.osm.parquet"
+          p="planet-${{ steps.date.outputs.tag }}.osm.pbf"
+          time quackosm "$p" --output "$g"
+          sha256sum "$g" >"$g.sha256"
+          stat -c '%s %W %Z' "$g" | \
+            awk '{print "{\"created\":"($2==0?$3:$2)",\"size\":"$1"}"}' >"$g.metadata"
+      
+      - name: Check the size of the Parquet file
+        run: ls -lh "planet-${{ steps.date.outputs.tag }}.osm.parquet"
+
       - name: Install duckdb
         uses: opt-nc/setup-duckdb-action@v1.0.14
 
       # Step 6: Test querying the Parquet file with DuckDB
       - name: Test querying with duckdb
-        run: duckdb -c "SELECT * FROM 'monaco-latest.osm.parquet';"
+        run: duckdb -c "INSTALL spatial; LOAD spatial; DESCRIBE SELECT * FROM 'planet-${{ steps.date.outputs.tag }}.osm.parquet'";
