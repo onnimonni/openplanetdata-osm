@@ -1,0 +1,45 @@
+name: Convert Monaco OSM to Parquet
+
+# Controls when the action will run.
+# "workflow_dispatch" allows you to run this workflow manually from the Actions tab.
+# "push" with a branch filter runs the workflow on every push to the main branch.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  # The single job in this workflow
+  build:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+
+    # A sequence of tasks that will be executed as part of the job
+    steps:
+      # Step 1: Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Python environment
+      - name: Set up Python
+        uses: actions/setup-python@v5
+
+      # Step 3: Install the required Python package with the CLI extra
+      - name: Install quackosm
+        run: pip install 'quackosm[cli]'
+
+      # Step 4: Download the OpenStreetMap PBF file for Monaco
+      - name: Download Monaco PBF
+        run: wget https://download.geofabrik.de/europe/monaco-latest.osm.pbf
+
+      # Step 5: Run the quackosm conversion command
+      - name: Convert PBF to Parquet
+        run: quackosm monaco-latest.osm.pbf --output monaco-latest.osm.parquet
+        
+      - name: Install duckdb
+        uses: opt-nc/setup-duckdb-action@v1.0.14
+
+      # Step 6: Test querying the Parquet file with DuckDB
+      - name: Test querying with duckdb
+        run: duckdb -c "SELECT * FROM 'monaco-latest.osm.parquet';"
